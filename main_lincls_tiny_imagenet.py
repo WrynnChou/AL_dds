@@ -64,7 +64,7 @@ parser.add_argument(
 parser.add_argument(
     "-b",
     "--batch-size",
-    default=8,
+    default=128,
     type=int,
     metavar="N",
     help="mini-batch size (default: 256), this is the total "
@@ -74,7 +74,7 @@ parser.add_argument(
 parser.add_argument(
     "--lr",
     "--learning-rate",
-    default=30.0,
+    default=15,
     type=float,
     metavar="LR",
     help="initial learning rate",
@@ -88,10 +88,11 @@ parser.add_argument(
     help="learning rate schedule (when to drop lr by a ratio)",
 )
 parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
+parser.add_argument("--subsetsize", default=3000, type=int, help="Size of initial selected subset")
 parser.add_argument(
     "--wd",
     "--weight-decay",
-    default=0.0,
+    default=0,
     type=float,
     metavar="W",
     help="weight decay (default: 0.)",
@@ -150,9 +151,14 @@ parser.add_argument(
     "fastest way to use PyTorch for either single node or "
     "multi node data parallel training",
 )
-
 parser.add_argument(
     "--pretrained", default="", type=str, help="path to moco pretrained checkpoint"
+)
+parser.add_argument(
+    "--active-indices", default="", type=str, help="path to samples whose indices are selected by active learning methods."
+)
+parser.add_argument(
+    "--learning-mode", default="full", type=str, help="Decide which modes should be used for training;     'full' represents training models with full dataset, 'active' represents training models with initial dataset selected by active learning, 'random' represents training models with randomly selected initial labeled dataset."
 )
 
 best_acc1 = 0
@@ -229,10 +235,12 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     model = models.__dict__[args.arch](num_classes=200)
 
-    # freeze all layers but the last fc
+    # freeze all layers but the last fc, remove if update all model parameters
+    ####################################################
     for name, param in model.named_parameters():
         if name not in ["fc.weight", "fc.bias"]:
             param.requires_grad = False
+    ####################################################
     # init the fc layer
     model.fc.weight.data.normal_(mean=0.0, std=0.01)
     model.fc.bias.data.zero_()
@@ -262,6 +270,7 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> loaded pre-trained model '{}'".format(args.pretrained))
         else:
             print("=> no checkpoint found at '{}'".format(args.pretrained))
+
 
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -298,11 +307,17 @@ def main_worker(gpu, ngpus_per_node, args):
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
     # optimize only the linear classifier
+    ################################################################################
     parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
     assert len(parameters) == 2  # fc.weight, fc.bias
     optimizer = torch.optim.SGD(
         parameters, args.lr, momentum=args.momentum, weight_decay=args.weight_decay
     )
+    #################################################################################
+    # optimize all the model parameters
+    #optimizer = torch.optim.SGD(
+        #model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay
+    #)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -332,8 +347,8 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, "")
-    valdir = os.path.join(args.data, "")
+    traindir = os.path.join(args.data, "train")
+    valdir = os.path.join(args.data, "val")
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     )
@@ -349,6 +364,22 @@ def main_worker(gpu, ngpus_per_node, args):
             ]
         ),
     )
+    
+    # Train model with full dataset, randomly selected subset or active learning subset
+    if args.learning_mode == "full":
+        print("Training model with full dataset")
+    elif args.learning_mode == "active":
+        if os.path.isfile(args.active_indices):
+            print("=> loading sample indices '{}'".format(args.active_indices))
+            al_indices = torch.from_file(args.active_indices, shared=False, size=args.subsetsize, dtype=torch.long)
+            train_dataset = torch.utils.data.Subset(train_dataset, al_indices)
+            print("Training model with active learning subset")
+        else:
+            print("=> no indices found at '{}'".format(args.pretrained))
+    else:
+        generator1 = torch.Generator()
+        train_dataset = torch.utils.data.random_split(train_dataset, [args.subsetsize, len(train_dataset)-args.subsetsize], generator=generator1)[0]
+        print("Training model with randomly selected subset")
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -414,8 +445,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 },
                 is_best,
             )
-            if epoch == args.start_epoch:
-                sanity_check(model.state_dict(), args.pretrained)
+            #train all model parameters hence sanity check is no longer useful
+            ######################################################
+            #if epoch == args.start_epoch:
+                #sanity_check(model.state_dict(), args.pretrained)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -446,7 +479,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(images)
@@ -488,7 +521,7 @@ def validate(val_loader, model, criterion, args):
         for i, (images, target) in enumerate(val_loader):
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
+                target = target.cuda(args.gpu, non_blocking=True)
 
             # compute output
             output = model(images)
@@ -537,9 +570,9 @@ def sanity_check(state_dict, pretrained_weights):
 
         # name in pretrained model
         k_pre = (
-            "module.encoder_q." + k[len("module.") :]
+            "encoder_q." + k[len("module.") :]
             if k.startswith("module.")
-            else "module.encoder_q." + k
+            else "encoder_q." + k
         )
 
         assert (
@@ -612,7 +645,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].contiguous().view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
