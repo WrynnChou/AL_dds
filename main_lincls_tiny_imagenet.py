@@ -25,7 +25,7 @@ import torch.utils.data.distributed
 import torchvision.datasets as datasets
 import torchvision.models as models
 import torchvision.transforms as transforms
-
+import numpy as np
 
 model_names = sorted(
     name
@@ -155,12 +155,17 @@ parser.add_argument(
     "--pretrained", default="", type=str, help="path to moco pretrained checkpoint"
 )
 parser.add_argument(
-    "--active-indices", default="", type=str, help="path to samples whose indices are selected by active learning methods."
+    "--active-indices", default="", type=str, help="path to samples whose indices are selected by active "
+    "learning methods."
 )
 parser.add_argument(
-    "--learning-mode", default="full", type=str, help="Decide which modes should be used for training;     'full' represents training models with full dataset, 'active' represents training models with initial dataset selected by active learning, 'random' represents training models with randomly selected initial labeled dataset."
+    "--learning-mode", default="full", type=str, help="Decide which modes should be used for training;"
+    "'full' represents training models with full dataset, 'active' represents training models with initial dataset "
+    "selected by active learning, 'random' represents training models with randomly selected initial labeled dataset."
 )
-
+parser.add_argument(
+    "--num_classes", default=200, type=int, help= "Number of classes to be classification."
+)
 best_acc1 = 0
 
 
@@ -233,8 +238,15 @@ def main_worker(gpu, ngpus_per_node, args):
         )
     # create model
     print("=> creating model '{}'".format(args.arch))
-    model = models.__dict__[args.arch](num_classes=200)
+    model = models.__dict__[args.arch](num_classes=args.num_classes)
 
+    def setup_seed(seed):
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.backends.cudnn.deterministic = True
+    setup_seed(777)
     # freeze all layers but the last fc, remove if update all model parameters
     ####################################################
     for name, param in model.named_parameters():
@@ -315,9 +327,6 @@ def main_worker(gpu, ngpus_per_node, args):
     )
     #################################################################################
     # optimize all the model parameters
-    #optimizer = torch.optim.SGD(
-        #model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay
-    #)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -366,21 +375,35 @@ def main_worker(gpu, ngpus_per_node, args):
     )
     
     # Train model with full dataset, randomly selected subset or active learning subset
+
+    # ------------------------------------------------------------------------------------------
     if args.learning_mode == "full":
         print("Training model with full dataset")
     elif args.learning_mode == "active":
         if os.path.isfile(args.active_indices):
-            print("=> loading sample indices '{}'".format(args.active_indices))
-            al_indices = torch.from_file(args.active_indices, shared=False, size=args.subsetsize, dtype=torch.long)
+            file_extension = os.path.splitext(args.active_indices)[1]
+            support_extension = ['.txt', '.csv', '.pt']
+            if file_extension not in support_extension:
+                print("Indices file format is invalid ")
+            else:
+                if file_extension == '.pt':
+                    al_indices = torch.from_file(args.active_indices, shared=False, size=args.subsetsize,
+                                                 dtype=torch.long)
+                else:
+                    al_indices = np.loadtxt(args.active_indices, skiprows=1)
+                    al_indices = torch.tensor(al_indices, dtype=torch.long) - 1  # 0:49999 vs 1:50000
+
+                print("Training model with active learning subset")
             train_dataset = torch.utils.data.Subset(train_dataset, al_indices)
-            print("Training model with active learning subset")
         else:
-            print("=> no indices found at '{}'".format(args.pretrained))
+            raise ValueError("No indices named as '{}'".format(args.active_indices))
     else:
         generator1 = torch.Generator()
-        train_dataset = torch.utils.data.random_split(train_dataset, [args.subsetsize, len(train_dataset)-args.subsetsize], generator=generator1)[0]
+        train_dataset = \
+        torch.utils.data.random_split(train_dataset, [args.subsetsize, len(train_dataset) - args.subsetsize],
+                                      generator=generator1)[0]
         print("Training model with randomly selected subset")
-
+    # ---------------------------------------------------------------
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
