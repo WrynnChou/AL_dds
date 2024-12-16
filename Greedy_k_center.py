@@ -44,3 +44,15 @@ def greedyk(featurepath='feature/resnet50_o16_feature_2.txt', M=500, savepath='r
     print("Greedy k center saved in the %s" % savepath)
 
 greedyk(M=1000,savepath='r/imagenet_o16_2_kcenter1000_indices.csv')
+
+greedyk("feature/resnet50_stl10_128_feature.txt",20, "r/todo/stl_128_kcenter20_indices.csv")
+greedyk("feature/resnet50_stl10_128_feature.txt",50, "r/todo/stl_128_kcenter50_indices.csv")
+greedyk("feature/resnet50_stl10_128_feature.txt",100, "r/todo/stl_128_kcenter100_indices.csv")
+greedyk("feature/resnet50_stl10_128_feature.txt",150, "r/todo/stl_128_kcenter150_indices.csv")
+greedyk("feature/resnet50_stl10_128_feature.txt",300, "r/todo/stl_128_kcenter300_indices.csv")
+
+greedyk("feature/resnet50_stl10_128_feature.txt",500, "r/todo/stl_128_kcenter500_indices.csv")
+greedyk("feature/resnet50_stl10_128_feature.txt",300, "r/todo/stl_128_kcenter800_indices.csv")
+
+
+
